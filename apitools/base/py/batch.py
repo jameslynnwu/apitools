@@ -189,7 +189,7 @@ class BatchApiRequest(object):
         """Execute all of the requests in the batch.
 
         Args:
-          http: httplib2.Http object for use in the request.
+          http: httplib2.Http or requests.Session object for use in the request.
           sleep_between_polls: Integer number of seconds to sleep between
               polls.
           max_retries: Max retries. Any requests that have not succeeded by
@@ -420,10 +420,11 @@ class BatchHttpRequest(object):
         """Serialize batch request, send to server, process response.
 
         Args:
-          http: A httplib2.Http object to be used to make the request with.
+          http: A httplib2.Http or requests.Session object to be used to make the request with.
 
         Raises:
           httplib2.HttpLib2Error if a transport error has occured.
+          requests.exceptions.RequestException if a transport error has occured.
           apiclient.errors.BatchError if the response is the wrong format.
         """
         message = mime_multipart.MIMEMultipart('mixed')
@@ -480,7 +481,7 @@ class BatchHttpRequest(object):
         """Execute all the requests as a single batched HTTP request.
 
         Args:
-          http: A httplib2.Http object to be used with the request.
+          http: A httplib2.Http or requests.Session object to be used with the request.
 
         Returns:
           None

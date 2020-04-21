@@ -18,6 +18,7 @@ import socket
 import unittest
 
 import httplib2
+import requests
 from six.moves import http_client
 
 from mock import patch
@@ -119,6 +120,7 @@ class HttpWrapperTest(unittest.TestCase):
                 http_client.ResponseNotReady(),
                 socket.error(),
                 socket.gaierror(),
+                requests.exceptions.ConnectionError(),
                 httplib2.ServerNotFoundError(),
                 ValueError(),
                 exceptions.RequestError(),
@@ -137,3 +139,8 @@ class HttpWrapperTest(unittest.TestCase):
             with patch('time.sleep', return_value=None):
                 http_wrapper.HandleExceptionsAndRebuildHttpConnections(
                     retry_args)
+
+    def testInvalidHttpTransportUsed(self):
+        with self.assertRaises(TypeError):
+            http = dict
+            http_wrapper.MakeRequest(http, http_wrapper.Request())

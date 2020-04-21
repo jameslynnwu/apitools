@@ -17,7 +17,7 @@
 """HTTP wrapper for apitools.
 
 This library wraps the underlying http library we use, which is
-currently httplib2.
+currently httplib2 and requests.
 """
 
 import collections
@@ -40,6 +40,13 @@ try:
 except ImportError:
     from oauth2client.client import AccessTokenRefreshError as TokenRefreshError  # noqa
 
+REQUESTS_SUPPORTED = False
+try:
+    import requests
+    REQUESTS_SUPPORTED = True
+except ImportError as caught_exc:
+    pass
+
 __all__ = [
     'CheckResponse',
     'GetHttp',
@@ -55,15 +62,8 @@ __all__ = [
 # 308 and 429 don't have names in httplib.
 RESUME_INCOMPLETE = 308
 TOO_MANY_REQUESTS = 429
-_REDIRECT_STATUS_CODES = (
-    http_client.MOVED_PERMANENTLY,
-    http_client.FOUND,
-    http_client.SEE_OTHER,
-    http_client.TEMPORARY_REDIRECT,
-    RESUME_INCOMPLETE,
-)
 
-# http: An httplib2.Http instance.
+# http: An httplib2.Http or requests.Session instance.
 # http_request: A http_wrapper.Request.
 # exc: Exception being raised.
 # num_retries: Number of retries consumed; used for exponential backoff.
@@ -206,11 +206,6 @@ class Response(collections.namedtuple(
         if 'retry-after' in self.info:
             return int(self.info['retry-after'])
 
-    @property
-    def is_redirect(self):
-        return (self.status_code in _REDIRECT_STATUS_CODES and
-                'location' in self.info)
-
 
 def CheckResponse(response):
     if response is None:
@@ -261,7 +256,7 @@ def HandleExceptionsAndRebuildHttpConnections(retry_args):
     # calculate the wait time on our own.
     retry_after = None
 
-    # Transport failures
+    # httplib2 Transport failures
     if isinstance(retry_args.exc, (http_client.BadStatusLine,
                                    http_client.IncompleteRead,
                                    http_client.ResponseNotReady)):
@@ -291,6 +286,10 @@ def HandleExceptionsAndRebuildHttpConnections(retry_args):
         logging.debug(
             'Caught transient credential refresh error (%s), retrying',
             retry_args.exc)
+    # requests Transport failures
+    elif REQUESTS_SUPPORTED and isinstance(retry_args.exc, requests.exceptions.ConnectionError):
+        logging.debug('Caught HTTP error %s, retrying: %s',
+                      type(retry_args.exc).__name__, retry_args.exc)
     elif isinstance(retry_args.exc, exceptions.RequestError):
         logging.debug('Request returned no response, retrying')
     # API-level failures
@@ -302,7 +301,9 @@ def HandleExceptionsAndRebuildHttpConnections(retry_args):
         retry_after = retry_args.exc.retry_after
     else:
         raise retry_args.exc
-    RebuildHttpConnections(retry_args.http)
+
+    if isinstance(retry_args.http, httplib2.Http):
+        RebuildHttpConnections(retry_args.http)
     logging.debug('Retrying request to url %s after exception %s',
                   retry_args.http_request.url, retry_args.exc)
     time.sleep(
@@ -317,8 +318,7 @@ def MakeRequest(http, http_request, retries=7, max_retry_wait=60,
     """Send http_request via the given http, performing error/retry handling.
 
     Args:
-      http: An httplib2.Http instance, or a http multiplexer that delegates to
-          an underlying http, for example, HTTPMultiplexer.
+      http: A httplib2.Http or requests.Session object to be used with the request.
       http_request: A Request to send.
       retries: (int, default 7) Number of retries to attempt on retryable
           replies (such as 429 or 5XX).
@@ -368,8 +368,7 @@ def _MakeRequestNoRetry(http, http_request, redirections=5,
     request/response types and the Request and Response types above.
 
     Args:
-      http: An httplib2.Http instance, or a http multiplexer that delegates to
-          an underlying http, for example, HTTPMultiplexer.
+      http: A httplib2.Http or requests.Session object to be used with the request.
       http_request: A Request to send.
       redirections: (int, default 5) Number of redirects to follow.
       check_response_func: Function to validate the HTTP response.
@@ -382,27 +381,49 @@ def _MakeRequestNoRetry(http, http_request, redirections=5,
       RequestError if no response could be parsed.
 
     """
-    connection_type = None
-    # Handle overrides for connection types.  This is used if the caller
-    # wants control over the underlying connection for managing callbacks
-    # or hash digestion.
-    if getattr(http, 'connections', None):
-        url_scheme = parse.urlsplit(http_request.url).scheme
-        if url_scheme and url_scheme in http.connections:
-            connection_type = http.connections[url_scheme]
+    def MakeRequestHttplib2():
+        connection_type = None
+        # Handle overrides for connection types.  This is used if the caller
+        # wants control over the underlying connection for managing callbacks
+        # or hash digestion.
+        if getattr(http, 'connections', None):
+            url_scheme = parse.urlsplit(http_request.url).scheme
+            if url_scheme and url_scheme in http.connections:
+                connection_type = http.connections[url_scheme]
 
-    # Custom printing only at debuglevel 4
-    new_debuglevel = 4 if httplib2.debuglevel == 4 else 0
-    with _Httplib2Debuglevel(http_request, new_debuglevel, http=http):
-        info, content = http.request(
-            str(http_request.url), method=str(http_request.http_method),
-            body=http_request.body, headers=http_request.headers,
-            redirections=redirections, connection_type=connection_type)
+        # Custom printing only at debuglevel 4
+        new_debuglevel = 4 if httplib2.debuglevel == 4 else 0
+        with _Httplib2Debuglevel(http_request, new_debuglevel, http=http):
+            info, content = http.request(
+                str(http_request.url), method=str(http_request.http_method),
+                body=http_request.body, headers=http_request.headers,
+                redirections=redirections, connection_type=connection_type)
 
-    if info is None:
-        raise exceptions.RequestError()
+        if info is None:
+            raise exceptions.RequestError()
 
-    response = Response(info, content, http_request.url)
+        return Response(info, content, http_request.url)
+
+    def MakeRequestRequests():
+        response = http.request(str(http_request.http_method),
+                                str(http_request.url),
+                                headers=http_request.headers,
+                                body=http_request.body)
+        response.raise_for_status()
+        headers = response.headers.copy()
+        headers['status'] = response.status_code
+        return Response(response.headers, response.content, http_request.url)
+    
+    if isinstance(http, httplib2.Http):
+        response = MakeRequestHttplib2()
+    elif REQUESTS_SUPPORTED and isinstance(http, requests.Session):
+        response = MakeRequestRequests()
+    else:
+        raise TypeError(
+            "http objects of type {} are not supported. "
+            "Please provide either httplib2.Http or requests.Session."
+        , type(http))
+    
     check_response_func(response)
     return response
 
