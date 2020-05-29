@@ -412,18 +412,13 @@ def _MakeRequestNoRetry(http, http_request, redirections=5,
         response.raise_for_status()
         headers = response.headers.copy()
         headers['status'] = response.status_code
-        return Response(response.headers, response.content, http_request.url)
-    
-    if isinstance(http, httplib2.Http):
-        response = MakeRequestHttplib2()
-    elif REQUESTS_SUPPORTED and isinstance(http, requests.Session):
+        return Response(headers, response.content, http_request.url)
+
+    if REQUESTS_SUPPORTED and isinstance(http, requests.Session):
         response = MakeRequestRequests()
-    else:
-        raise TypeError(
-            "http objects of type {} are not supported. "
-            "Please provide either httplib2.Http or requests.Session."
-        , type(http))
-    
+    elif isinstance(http, httplib2.Http):
+        response = MakeRequestHttplib2()
+
     check_response_func(response)
     return response
 
