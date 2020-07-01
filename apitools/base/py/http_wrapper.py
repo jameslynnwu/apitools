@@ -61,6 +61,7 @@ __all__ = [
 
 # 308 and 429 don't have names in httplib.
 RESUME_INCOMPLETE = 308
+NOT_FOUND = 404
 TOO_MANY_REQUESTS = 429
 
 # http: An httplib2.Http or requests.Session instance.
@@ -244,19 +245,9 @@ def RethrowExceptionHandler(*unused_args):
     raise
 
 
-def HandleExceptionsAndRebuildHttpConnections(retry_args):
-    """Exception handler for http failures.
-
-    This catches known failures and rebuilds the underlying HTTP connections.
-
-    Args:
-      retry_args: An ExceptionRetryArgs tuple.
+def _HandleHttplib2Exception(retry_args):
     """
-    # If the server indicates how long to wait, use that value.  Otherwise,
-    # calculate the wait time on our own.
-    retry_after = None
-
-    # httplib2 Transport failures
+    """
     if isinstance(retry_args.exc, (http_client.BadStatusLine,
                                    http_client.IncompleteRead,
                                    http_client.ResponseNotReady)):
@@ -286,24 +277,57 @@ def HandleExceptionsAndRebuildHttpConnections(retry_args):
         logging.debug(
             'Caught transient credential refresh error (%s), retrying',
             retry_args.exc)
-    # requests Transport failures
-    elif REQUESTS_SUPPORTED and isinstance(retry_args.exc, requests.exceptions.ConnectionError):
+    else:
+        return False
+    return True
+
+
+def _HandleRequestsException(retry_args):
+    """
+    """
+    if isinstance(retry_args.exc, requests.exceptions.ConnectionError):
         logging.debug('Caught HTTP error %s, retrying: %s',
                       type(retry_args.exc).__name__, retry_args.exc)
-    elif isinstance(retry_args.exc, exceptions.RequestError):
-        logging.debug('Request returned no response, retrying')
-    # API-level failures
-    elif isinstance(retry_args.exc, exceptions.BadStatusCodeError):
-        logging.debug('Response returned status %s, retrying',
-                      retry_args.exc.status_code)
-    elif isinstance(retry_args.exc, exceptions.RetryAfterError):
-        logging.debug('Response returned a retry-after header, retrying')
-        retry_after = retry_args.exc.retry_after
+    elif isinstance(retry_args.exc, requests.exceptions.Timeout):
+        logging.debug('Caught timeout error %s, retrying: %s',
+                      type(retry_args.exc).__name__, retry_args.exc)
     else:
-        raise retry_args.exc
+        return False
+    return True
 
-    if isinstance(retry_args.http, httplib2.Http):
-        RebuildHttpConnections(retry_args.http)
+
+def HandleExceptionsAndRebuildHttpConnections(retry_args):
+    """Exception handler for http failures.
+
+    This catches known failures and rebuilds the underlying HTTP connections.
+
+    Args:
+      retry_args: An ExceptionRetryArgs tuple.
+    """
+    # If the server indicates how long to wait, use that value.  Otherwise,
+    # calculate the wait time on our own.
+    retry_after = None
+
+    if REQUESTS_SUPPORTED and isinstance(retry_args.http, requests.Session):
+        exception_handled =_HandleRequestsException(retry_args)
+    else:
+        exception_handled = _HandleHttplib2Exception(retry_args)
+
+    if not exception_handled:
+        if isinstance(retry_args.exc, exceptions.RequestError):
+            logging.debug('Request returned no response, retrying')
+        # API-level failures
+        elif isinstance(retry_args.exc, exceptions.BadStatusCodeError):
+            logging.debug('Response returned status %s, retrying',
+                          retry_args.exc.status_code)
+        elif isinstance(retry_args.exc, exceptions.RetryAfterError):
+            logging.debug('Response returned a retry-after header, retrying')
+            retry_after = retry_args.exc.retry_after
+        else:
+            raise retry_args.exc
+
+    RebuildHttpConnections(retry_args.http)
+
     logging.debug('Retrying request to url %s after exception %s',
                   retry_args.http_request.url, retry_args.exc)
     time.sleep(
@@ -408,15 +432,14 @@ def _MakeRequestNoRetry(http, http_request, redirections=5,
         response = http.request(str(http_request.http_method),
                                 str(http_request.url),
                                 headers=http_request.headers,
-                                body=http_request.body)
-        response.raise_for_status()
+                                data=http_request.body)
         headers = response.headers.copy()
         headers['status'] = response.status_code
         return Response(headers, response.content, http_request.url)
 
     if REQUESTS_SUPPORTED and isinstance(http, requests.Session):
         response = MakeRequestRequests()
-    elif isinstance(http, httplib2.Http):
+    else:
         response = MakeRequestHttplib2()
 
     check_response_func(response)

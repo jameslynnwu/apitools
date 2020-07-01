@@ -457,7 +457,8 @@ class BatchHttpRequest(object):
 
         content = response.content
         if isinstance(content, bytes) and self.__response_encoding:
-            content = response.content.decode(self.__response_encoding)
+            content = response.content.decode(self.__response_encoding or
+                                              'utf-8')
 
         parser = email_parser.Parser()
         mime_response = parser.parsestr(header + content)
