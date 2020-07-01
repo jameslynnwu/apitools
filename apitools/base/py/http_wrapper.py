@@ -61,7 +61,6 @@ __all__ = [
 
 # 308 and 429 don't have names in httplib.
 RESUME_INCOMPLETE = 308
-NOT_FOUND = 404
 TOO_MANY_REQUESTS = 429
 
 # http: An httplib2.Http or requests.Session instance.
@@ -309,7 +308,7 @@ def HandleExceptionsAndRebuildHttpConnections(retry_args):
     retry_after = None
 
     if REQUESTS_SUPPORTED and isinstance(retry_args.http, requests.Session):
-        exception_handled =_HandleRequestsException(retry_args)
+        exception_handled = _HandleRequestsException(retry_args)
     else:
         exception_handled = _HandleHttplib2Exception(retry_args)
 
